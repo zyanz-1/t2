@@ -386,6 +386,19 @@
       return kec !== kab;
     }
 
+    // Helper: cek apakah nama desa/kelurahan valid (bukan nama kecamatan atau kabupaten)
+    function isDesaValid(desaName, kecName, kabName) {
+      if (!desaName) return false;
+      if (/^(kecamatan|kec\.?|kabupaten|kota)\s+/i.test(desaName.trim())) return false;
+      const desa = desaName.toLowerCase().replace(/^(desa|kelurahan|kel\.?)\s*/i, '').trim();
+      const kec  = (kecName || '').toLowerCase().replace(/^(kecamatan|kec\.?)\s*/i, '').trim();
+      const kab  = (kabName || '').toLowerCase().replace(/^(kabupaten|kota)\s*/i, '').trim();
+      if (!desa) return false;
+      if (kec && desa === kec) return false;
+      if (kab && desa === kab) return false;
+      return true;
+    }
+
     function reverseGeocode(lat, lng) {
       const reqId = ++latestGeocodeRequestId;
       fetchBigDataCloud(lat, lng, reqId);
@@ -409,7 +422,7 @@
 
           const prov = lvl4    ? translateProvince(lvl4.name)  : translateProvince(data.principalSubdivision || '');
           const kab  = lvl5    ? lvl5.name                     : (data.city || '');
-          const desa = lvlDesa ? lvlDesa.name                  : (data.locality || '');
+          let   desa = lvlDesa ? lvlDesa.name                  : (data.locality || '');
 
           // Kecamatan dari BigDataCloud: validasi dulu, tolak jika = kabupaten
           let kec = '';
@@ -418,9 +431,14 @@
             if (isKecamatanValid(`Kec. ${rawKec}`, kab)) kec = `Kec. ${rawKec}`;
           }
 
+          // Validasi desa agar tidak tertukar dengan kecamatan / kabupaten
+          if (!isDesaValid(desa, kec, kab)) {
+            desa = '';
+          }
+
           if (prov) document.getElementById('inputProvinsi').value  = prov;
           if (kab)  document.getElementById('inputKabupaten').value = kab;
-          if (desa) document.getElementById('inputDesa').value      = desa;
+          document.getElementById('inputDesa').value      = desa;
           // Update kecamatan (kosongkan dulu jika belum dapat agar tidak nyangkut nilai titik lama)
           document.getElementById('inputKecamatan').value = kec;
           updateCanvas();
@@ -428,7 +446,7 @@
           // Perkuat kecamatan via GeoJSON (paralel — override jika ketemu)
           if (prov) {
             lookupKecamatanGeoJSON(lat, lng, prov, kab, reqId);
-          } else if (!kec) {
+          } else if (!kec || !desa) {
             fetchNominatim(lat, lng, true, reqId);
           }
         })
@@ -454,7 +472,7 @@
       if (geoJsonCache[fileSlug]) {
         if (reqId !== latestGeocodeRequestId) return;
         const matched = applyTurfLookup(lat, lng, geoJsonCache[fileSlug], kabName);
-        if (!matched && !document.getElementById('inputKecamatan').value) {
+        if ((!matched && !document.getElementById('inputKecamatan').value) || !document.getElementById('inputDesa').value) {
           fetchNominatim(lat, lng, true, reqId);
         }
         return;
@@ -485,12 +503,12 @@
         .then(gj => {
           if (reqId !== latestGeocodeRequestId) return;
           const matched = applyTurfLookup(lat, lng, gj, kabName);
-          if (!matched && !document.getElementById('inputKecamatan').value) {
+          if ((!matched && !document.getElementById('inputKecamatan').value) || !document.getElementById('inputDesa').value) {
             fetchNominatim(lat, lng, true, reqId);
           }
         })
         .catch(() => {
-          if (reqId === latestGeocodeRequestId && !document.getElementById('inputKecamatan').value) {
+          if (reqId === latestGeocodeRequestId && (!document.getElementById('inputKecamatan').value || !document.getElementById('inputDesa').value)) {
             fetchNominatim(lat, lng, true, reqId);
           }
         });
@@ -514,19 +532,28 @@
         const desaRaw = found.ADM4_EN || found.ADM4_ID || found.DESA || found.desa || found.NAME_4 || '';
 
         let updated = false;
+        let currentKec = document.getElementById('inputKecamatan').value || '';
         if (kecRaw) {
           const kecClean = kecRaw.replace(/^(kecamatan|kec\.?)\s*/i, '').trim();
           const kecFull  = `Kec. ${kecClean}`;
           // Hanya update jika lolos validasi (bukan nama kabupaten)
           if (isKecamatanValid(kecFull, kabName || '')) {
             document.getElementById('inputKecamatan').value = kecFull;
+            currentKec = kecFull;
             updated = true;
+
+            // Jika nilai desa sebelumnya ternyata sama dengan kecamatan yang baru ketemu, bersihkan
+            const currentDesa = document.getElementById('inputDesa').value || '';
+            if (currentDesa && !isDesaValid(currentDesa, kecFull, kabName || '')) {
+              document.getElementById('inputDesa').value = '';
+            }
           }
         }
-        if (desaRaw && !document.getElementById('inputDesa').value) {
+        if (desaRaw && !document.getElementById('inputDesa').value && isDesaValid(desaRaw, currentKec, kabName || '')) {
           document.getElementById('inputDesa').value = desaRaw;
+          updated = true;
         }
-        if (updated || desaRaw) updateCanvas();
+        if (updated) updateCanvas();
         return updated;
       } catch (e) {
         return false;
@@ -555,11 +582,13 @@
               if (prov) document.getElementById('inputProvinsi').value  = prov;
             }
             const kabCurrent = document.getElementById('inputKabupaten').value || '';
-            if (desa && (!kecOnly || !document.getElementById('inputDesa').value)) {
-              document.getElementById('inputDesa').value = desa;
-            }
-            if (kec && isKecamatanValid(kec, kabCurrent)) {
+            const kecCurrent = document.getElementById('inputKecamatan').value || '';
+            if (kec && isKecamatanValid(kec, kabCurrent) && (!kecOnly || !kecCurrent)) {
               document.getElementById('inputKecamatan').value = kec;
+            }
+            const finalKec = document.getElementById('inputKecamatan').value || kec;
+            if (desa && isDesaValid(desa, finalKec, kabCurrent) && (!kecOnly || !document.getElementById('inputDesa').value)) {
+              document.getElementById('inputDesa').value = desa;
             }
             updateCanvas();
           }
