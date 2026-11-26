@@ -192,31 +192,50 @@
     let coordMode = 'auto';
     let originalFileName = 'photo';
 
-    // ─── Cache GeoJSON per provinsi agar tidak re-download setiap klik ───
+    // ─── Cache GeoJSON & daftar folder kabupaten agar tidak re-download setiap klik ───
     const geoJsonCache = {};
-    // Promise in-flight per provinsi agar tidak double-fetch & bebas race condition
-    const geoJsonPromises = {};
-    // ID request terbaru untuk mencegah hasil klik lama menimpa klik baru
-    let latestGeocodeRequestId = 0;
+    const geoJsonStatus = {};
+    const provDirCache = {};
 
-    // Mapping nama provinsi (lowercase) ke kode file di repo JfrAziz/indonesia-district
-    // Sumber data: data batas wilayah resmi Indonesia, gratis & open source
-    // CDN: jsDelivr → GitHub (tidak ada biaya, tidak ada API key, tidak bisa di-abuse)
+    // Mapping nama provinsi (lowercase) ke nama folder resmi di repo JfrAziz/indonesia-district
     const PROVINCE_CODE_MAP = {
-      'aceh': 'aceh', 'sumatera utara': 'sumatera-utara', 'sumatera barat': 'sumatera-barat',
-      'riau': 'riau', 'kepulauan riau': 'kepulauan-riau', 'jambi': 'jambi',
-      'sumatera selatan': 'sumatera-selatan', 'kepulauan bangka belitung': 'bangka-belitung',
-      'bengkulu': 'bengkulu', 'lampung': 'lampung', 'dki jakarta': 'dki-jakarta',
-      'jawa barat': 'jawa-barat', 'banten': 'banten', 'jawa tengah': 'jawa-tengah',
-      'di yogyakarta': 'di-yogyakarta', 'jawa timur': 'jawa-timur', 'bali': 'bali',
-      'nusa tenggara barat': 'nusa-tenggara-barat', 'nusa tenggara timur': 'nusa-tenggara-timur',
-      'kalimantan barat': 'kalimantan-barat', 'kalimantan tengah': 'kalimantan-tengah',
-      'kalimantan selatan': 'kalimantan-selatan', 'kalimantan timur': 'kalimantan-timur',
-      'kalimantan utara': 'kalimantan-utara', 'sulawesi utara': 'sulawesi-utara',
-      'gorontalo': 'gorontalo', 'sulawesi tengah': 'sulawesi-tengah',
-      'sulawesi barat': 'sulawesi-barat', 'sulawesi selatan': 'sulawesi-selatan',
-      'sulawesi tenggara': 'sulawesi-tenggara', 'maluku': 'maluku',
-      'maluku utara': 'maluku-utara', 'papua barat': 'papua-barat', 'papua': 'papua'
+      'aceh': 'id11_aceh',
+      'sumatera utara': 'id12_sumatera_utara',
+      'sumatera barat': 'id13_sumatera_barat',
+      'riau': 'id14_riau',
+      'kepulauan riau': 'id21_kepulauan_riau',
+      'jambi': 'id15_jambi',
+      'sumatera selatan': 'id16_sumatera_selatan',
+      'kepulauan bangka belitung': 'id19_kepulauan_bangka_belitung',
+      'bangka belitung': 'id19_kepulauan_bangka_belitung',
+      'bengkulu': 'id17_bengkulu',
+      'lampung': 'id18_lampung',
+      'dki jakarta': 'id31_dki_jakarta',
+      'jakarta': 'id31_dki_jakarta',
+      'jawa barat': 'id32_jawa_barat',
+      'jawa tengah': 'id33_jawa_tengah',
+      'di yogyakarta': 'id34_daerah_istimewa_yogyakarta',
+      'daerah istimewa yogyakarta': 'id34_daerah_istimewa_yogyakarta',
+      'jawa timur': 'id35_jawa_timur',
+      'banten': 'id36_banten',
+      'bali': 'id51_bali',
+      'nusa tenggara barat': 'id52_nusa_tenggara_barat',
+      'nusa tenggara timur': 'id53_nusa_tenggara_timur',
+      'kalimantan barat': 'id61_kalimantan_barat',
+      'kalimantan tengah': 'id62_kalimantan_tengah',
+      'kalimantan selatan': 'id63_kalimantan_selatan',
+      'kalimantan timur': 'id64_kalimantan_timur',
+      'kalimantan utara': 'id65_kalimantan_utara',
+      'sulawesi utara': 'id71_sulawesi_utara',
+      'sulawesi tengah': 'id72_sulawesi_tengah',
+      'sulawesi selatan': 'id73_sulawesi_selatan',
+      'sulawesi tenggara': 'id74_sulawesi_tenggara',
+      'gorontalo': 'id75_gorontalo',
+      'sulawesi barat': 'id76_sulawesi_barat',
+      'maluku': 'id81_maluku',
+      'maluku utara': 'id82_maluku_utara',
+      'papua barat': 'id91_papua_barat',
+      'papua': 'id94_papua'
     };
 
     // Default Coordinates
@@ -375,42 +394,24 @@
     //   Layer 3: Nominatim OSM → fallback terakhir
     // ═══════════════════════════════════════════════════════════════════
 
-    // Helper: cek apakah nama kecamatan valid (tidak sama persis dengan nama kabupaten/kota)
+    // Helper: cek apakah nama kecamatan valid (tidak sama dengan nama kabupaten)
     function isKecamatanValid(kecName, kabName) {
       if (!kecName) return false;
-      const kec = kecName.toLowerCase().replace(/^(kecamatan|kec\.?|kabupaten|kota)\s*/i, '').trim();
-      const kab = (kabName || '').toLowerCase().replace(/^(kabupaten|kota)\s*/i, '').trim();
-      if (!kec) return false;
-      if (!kab) return true;
-      // Hanya tolak jika sama persis setelah normalisasi prefix
-      return kec !== kab;
-    }
-
-    // Helper: cek apakah nama desa/kelurahan valid (bukan nama kecamatan atau kabupaten)
-    function isDesaValid(desaName, kecName, kabName) {
-      if (!desaName) return false;
-      if (/^(kecamatan|kec\.?|kabupaten|kota)\s+/i.test(desaName.trim())) return false;
-      const desa = desaName.toLowerCase().replace(/^(desa|kelurahan|kel\.?)\s*/i, '').trim();
-      const kec  = (kecName || '').toLowerCase().replace(/^(kecamatan|kec\.?)\s*/i, '').trim();
-      const kab  = (kabName || '').toLowerCase().replace(/^(kabupaten|kota)\s*/i, '').trim();
-      if (!desa) return false;
-      if (kec && desa === kec) return false;
-      if (kab && desa === kab) return false;
-      return true;
+      const kec = kecName.toLowerCase().replace(/^kec\.\s*/i, '').trim();
+      const kab = kabName.toLowerCase().replace(/^(kabupaten|kota)\s*/i, '').trim();
+      // Tolak jika identik atau satu mengandung yang lain sepenuhnya
+      return kec !== kab && !kec.includes(kab) && !kab.includes(kec);
     }
 
     function reverseGeocode(lat, lng) {
-      const reqId = ++latestGeocodeRequestId;
-      fetchBigDataCloud(lat, lng, reqId);
+      fetchBigDataCloud(lat, lng);
     }
 
     // ─── Layer 1: BigDataCloud untuk Provinsi, Kabupaten & Desa ───
-    function fetchBigDataCloud(lat, lng, reqId) {
+    function fetchBigDataCloud(lat, lng) {
       fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=id`)
         .then(res => res.json())
         .then(data => {
-          if (reqId !== latestGeocodeRequestId) return;
-
           const admins = (data.localityInfo && data.localityInfo.administrative) || [];
           const lvl4   = admins.find(a => a.adminLevel === 4);
           const lvl5   = admins.find(a => a.adminLevel === 5);
@@ -422,7 +423,7 @@
 
           const prov = lvl4    ? translateProvince(lvl4.name)  : translateProvince(data.principalSubdivision || '');
           const kab  = lvl5    ? lvl5.name                     : (data.city || '');
-          let   desa = lvlDesa ? lvlDesa.name                  : (data.locality || '');
+          const desa = lvlDesa ? lvlDesa.name                  : (data.locality || '');
 
           // Kecamatan dari BigDataCloud: validasi dulu, tolak jika = kabupaten
           let kec = '';
@@ -431,86 +432,90 @@
             if (isKecamatanValid(`Kec. ${rawKec}`, kab)) kec = `Kec. ${rawKec}`;
           }
 
-          // Validasi desa agar tidak tertukar dengan kecamatan / kabupaten
-          if (!isDesaValid(desa, kec, kab)) {
-            desa = '';
-          }
-
           if (prov) document.getElementById('inputProvinsi').value  = prov;
           if (kab)  document.getElementById('inputKabupaten').value = kab;
-          document.getElementById('inputDesa').value      = desa;
-          // Update kecamatan (kosongkan dulu jika belum dapat agar tidak nyangkut nilai titik lama)
-          document.getElementById('inputKecamatan').value = kec;
+          document.getElementById('inputDesa').value      = desa || '';
+          document.getElementById('inputKecamatan').value = kec  || '';
           updateCanvas();
 
-          // Perkuat kecamatan via GeoJSON (paralel — override jika ketemu)
-          if (prov) {
-            lookupKecamatanGeoJSON(lat, lng, prov, kab, reqId);
-          } else if (!kec || !desa) {
-            fetchNominatim(lat, lng, true, reqId);
-          }
+          // Perkuat Desa & Kecamatan via GeoJSON HDX-BPS (paralel — lebih akurat)
+          if (prov) lookupKecamatanGeoJSON(lat, lng, prov, kab);
         })
-        .catch(() => {
-          if (reqId === latestGeocodeRequestId) fetchNominatim(lat, lng, false, reqId);
-        });
+        .catch(() => fetchNominatim(lat, lng));
     }
 
-    // ─── Layer 2: Turf.js Point-in-Polygon dengan GeoJSON kecamatan Indonesia ───
-    // Sumber: HDX/OCHA Indonesia Admin Boundaries (data resmi, gratis, open source)
-    // CDN: jsDelivr → GitHub. Tanpa API key, tanpa biaya, tidak mungkin di-abuse.
-    function lookupKecamatanGeoJSON(lat, lng, provName, kabName, reqId) {
-      const provKey  = provName.toLowerCase().trim();
-      const fileSlug = PROVINCE_CODE_MAP[provKey];
-      if (!fileSlug) {
-        if (!document.getElementById('inputKecamatan').value) {
-          fetchNominatim(lat, lng, true, reqId);
-        }
-        return;
-      }
-
-      // Sudah ada di cache → langsung pakai
-      if (geoJsonCache[fileSlug]) {
-        if (reqId !== latestGeocodeRequestId) return;
-        const matched = applyTurfLookup(lat, lng, geoJsonCache[fileSlug], kabName);
-        if ((!matched && !document.getElementById('inputKecamatan').value) || !document.getElementById('inputDesa').value) {
-          fetchNominatim(lat, lng, true, reqId);
-        }
-        return;
-      }
-
-      // Belum ada di cache → gunakan promise yang sama jika sedang loading
-      if (!geoJsonPromises[fileSlug]) {
-        setGeoStatus('⏳ Memuat data kecamatan...');
-        const url = `https://cdn.jsdelivr.net/gh/JfrAziz/indonesia-district@master/geojson/district/${fileSlug}.geojson`;
-        geoJsonPromises[fileSlug] = fetch(url)
-          .then(r => {
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.json();
-          })
-          .then(gj => {
-            geoJsonCache[fileSlug] = gj;
-            setGeoStatus('');
-            return gj;
-          })
-          .catch(err => {
-            delete geoJsonPromises[fileSlug];
-            setGeoStatus('');
-            throw err;
-          });
-      }
-
-      geoJsonPromises[fileSlug]
-        .then(gj => {
-          if (reqId !== latestGeocodeRequestId) return;
-          const matched = applyTurfLookup(lat, lng, gj, kabName);
-          if ((!matched && !document.getElementById('inputKecamatan').value) || !document.getElementById('inputDesa').value) {
-            fetchNominatim(lat, lng, true, reqId);
+    // ─── Helper: cari folder kabupaten di dalam folder provinsi JfrAziz/indonesia-district ───
+    async function resolveGeoJsonUrl(provFolder, kabName) {
+      try {
+        if (!provDirCache[provFolder]) {
+          const res = await fetch(`https://api.github.com/repos/JfrAziz/indonesia-district/contents/${provFolder}`);
+          if (res.ok) {
+            const items = await res.json();
+            provDirCache[provFolder] = items.filter(i => i.type === 'dir').map(i => i.name);
           }
+        }
+        const dirs = provDirCache[provFolder] || [];
+        if (kabName && dirs.length > 0) {
+          const kabSlug = kabName.toLowerCase()
+            .replace(/^kabupaten\s+/i, '')
+            .replace(/^kab\.?\s+/i, '')
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_|_$/g, '');
+          // Prioritaskan kecocokan persis di akhir nama folder (misal id6306_hulu_sungai_selatan)
+          const matched = dirs.find(d => d.endsWith(`_${kabSlug}`))
+                       || dirs.find(d => d.includes(kabSlug));
+          if (matched) {
+            return {
+              cacheKey: matched,
+              url: `https://cdn.jsdelivr.net/gh/JfrAziz/indonesia-district@master/${provFolder}/${matched}/${matched}.geojson`
+            };
+          }
+        }
+      } catch (e) { /* fallback ke file provinsi */ }
+
+      return {
+        cacheKey: provFolder,
+        url: `https://cdn.jsdelivr.net/gh/JfrAziz/indonesia-district@master/${provFolder}/${provFolder}_district.geojson`
+      };
+    }
+
+    // ─── Layer 2: Turf.js Point-in-Polygon dengan GeoJSON batas resmi Indonesia (HDX-BPS) ───
+    // Sumber: JfrAziz/indonesia-district via jsDelivr CDN. Gratis, tanpa API key, tidak bisa di-abuse.
+    async function lookupKecamatanGeoJSON(lat, lng, provName, kabName) {
+      const provKey    = provName.toLowerCase().trim();
+      const provFolder = PROVINCE_CODE_MAP[provKey];
+      if (!provFolder) return;
+
+      const target = await resolveGeoJsonUrl(provFolder, kabName);
+      const cacheKey = target.cacheKey;
+
+      if (geoJsonStatus[cacheKey] === 'ready') {
+        applyTurfLookup(lat, lng, geoJsonCache[cacheKey], kabName);
+        return;
+      }
+      if (geoJsonStatus[cacheKey] === 'loading') {
+        setTimeout(() => lookupKecamatanGeoJSON(lat, lng, provName, kabName), 800);
+        return;
+      }
+
+      geoJsonStatus[cacheKey] = 'loading';
+      setGeoStatus('⏳ Memuat data desa & kecamatan...');
+
+      fetch(target.url)
+        .then(r => {
+          if (!r.ok) throw new Error('GeoJSON not found');
+          return r.json();
+        })
+        .then(gj => {
+          geoJsonCache[cacheKey]  = gj;
+          geoJsonStatus[cacheKey] = 'ready';
+          setGeoStatus('');
+          applyTurfLookup(lat, lng, gj, kabName);
         })
         .catch(() => {
-          if (reqId === latestGeocodeRequestId && (!document.getElementById('inputKecamatan').value || !document.getElementById('inputDesa').value)) {
-            fetchNominatim(lat, lng, true, reqId);
-          }
+          geoJsonStatus[cacheKey] = 'failed';
+          setGeoStatus('');
+          fetchNominatim(lat, lng, true);
         });
     }
 
@@ -524,48 +529,37 @@
             break;
           }
         }
-        if (!found) return false;
+        if (!found) return;
 
-        // Skema HDX/OCHA: ADM3_EN / ADM3_ID = Kecamatan, ADM4_EN / ADM4_ID = Desa
-        // Fallback ke skema alternatif jika tidak ada
-        const kecRaw  = found.ADM3_EN || found.ADM3_ID || found.KECAMATAN || found.kecamatan || found.NAME_3 || '';
-        const desaRaw = found.ADM4_EN || found.ADM4_ID || found.DESA || found.desa || found.NAME_4 || '';
+        // Properti JfrAziz/indonesia-district (HDX-BPS-2020):
+        //   province, regency, district (Kecamatan), village (Desa/Kelurahan)
+        const kecRaw  = found.district || found.ADM3_EN || found.ADM3_ID || found.KECAMATAN || found.kecamatan || found.NAME_3 || '';
+        const desaRaw = found.village  || found.ADM4_EN || found.ADM4_ID || found.DESA      || found.desa      || found.NAME_4 || '';
+        const kabRaw  = found.regency  || '';
+        const provRaw = found.province || '';
 
-        let updated = false;
-        let currentKec = document.getElementById('inputKecamatan').value || '';
+        if (provRaw) document.getElementById('inputProvinsi').value = translateProvince(provRaw);
+        if (kabRaw)  document.getElementById('inputKabupaten').value = kabRaw;
+
         if (kecRaw) {
           const kecClean = kecRaw.replace(/^(kecamatan|kec\.?)\s*/i, '').trim();
           const kecFull  = `Kec. ${kecClean}`;
-          // Hanya update jika lolos validasi (bukan nama kabupaten)
-          if (isKecamatanValid(kecFull, kabName || '')) {
+          if (isKecamatanValid(kecFull, kabRaw || kabName || '')) {
             document.getElementById('inputKecamatan').value = kecFull;
-            currentKec = kecFull;
-            updated = true;
-
-            // Jika nilai desa sebelumnya ternyata sama dengan kecamatan yang baru ketemu, bersihkan
-            const currentDesa = document.getElementById('inputDesa').value || '';
-            if (currentDesa && !isDesaValid(currentDesa, kecFull, kabName || '')) {
-              document.getElementById('inputDesa').value = '';
-            }
           }
         }
-        if (desaRaw && !document.getElementById('inputDesa').value && isDesaValid(desaRaw, currentKec, kabName || '')) {
+        if (desaRaw) {
           document.getElementById('inputDesa').value = desaRaw;
-          updated = true;
         }
-        if (updated) updateCanvas();
-        return updated;
-      } catch (e) {
-        return false;
-      }
+        updateCanvas();
+      } catch (e) { /* Turf error — biarkan data dari layer sebelumnya */ }
     }
 
     // ─── Layer 3: Nominatim (fallback terakhir) ───
-    function fetchNominatim(lat, lng, kecOnly = false, reqId = latestGeocodeRequestId) {
+    function fetchNominatim(lat, lng, kecOnly = false) {
       fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&accept-language=id&addressdetails=1`)
         .then(res => res.json())
         .then(data => {
-          if (reqId !== latestGeocodeRequestId) return;
           if (data && data.address) {
             const addr = data.address;
             const desa = addr.village || addr.quarter || addr.neighbourhood || addr.suburb || addr.hamlet || '';
@@ -582,13 +576,9 @@
               if (prov) document.getElementById('inputProvinsi').value  = prov;
             }
             const kabCurrent = document.getElementById('inputKabupaten').value || '';
-            const kecCurrent = document.getElementById('inputKecamatan').value || '';
-            if (kec && isKecamatanValid(kec, kabCurrent) && (!kecOnly || !kecCurrent)) {
+            if (desa) document.getElementById('inputDesa').value = desa;
+            if (kec && isKecamatanValid(kec, kabCurrent)) {
               document.getElementById('inputKecamatan').value = kec;
-            }
-            const finalKec = document.getElementById('inputKecamatan').value || kec;
-            if (desa && isDesaValid(desa, finalKec, kabCurrent) && (!kecOnly || !document.getElementById('inputDesa').value)) {
-              document.getElementById('inputDesa').value = desa;
             }
             updateCanvas();
           }
